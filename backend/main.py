@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -7,6 +7,9 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional, List
 import secrets
+import shutil
+import io
+from PIL import Image
 
 from database import init_db, get_db, Project, SoundCloudAuth, SessionLocal
 from ableton_parser import parse_ableton_project, find_longest_audio_clip
@@ -39,10 +42,12 @@ app.add_middleware(
 # Create necessary directories
 os.makedirs("data/previews", exist_ok=True)
 os.makedirs("data/covers", exist_ok=True)
+os.makedirs("data/audio", exist_ok=True)
 
 # Mount static files
 app.mount("/previews", StaticFiles(directory="data/previews"), name="previews")
 app.mount("/covers", StaticFiles(directory="data/covers"), name="covers")
+app.mount("/audio", StaticFiles(directory="data/audio"), name="audio")
 
 WATCH_FOLDER = os.path.expanduser("~/Music/ReleaseDrop")
 
@@ -240,6 +245,185 @@ def update_project(
     return {"message": "Project updated", "id": project_id}
 
 
+@app.post("/projects/{project_id}/cover")
+async def upload_cover(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """Upload cover art for a project"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only JPEG, PNG, and WebP are allowed.")
+
+    # Delete old cover if exists
+    if project.cover_path and os.path.exists(project.cover_path):
+        os.remove(project.cover_path)
+
+    # Save the uploaded file
+    cover_path = f"data/covers/{project_id}.png"
+
+    try:
+        # Read and process image
+        contents = await file.read()
+
+        # Open with PIL to validate and convert to PNG
+        img = Image.open(io.BytesIO(contents))
+
+        # Convert to RGB if necessary (handles RGBA, CMYK, etc.)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Resize to max 1000x1000 while maintaining aspect ratio
+        max_size = (1000, 1000)
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+
+        # Save as PNG
+        img.save(cover_path, 'PNG', optimize=True)
+
+        # Update database
+        project.cover_path = cover_path
+        project.updated_at = datetime.utcnow()
+        db.commit()
+
+        return {
+            "message": "Cover uploaded successfully",
+            "cover_url": f"/covers/{project_id}.png"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process image: {str(e)}")
+
+
+@app.post("/projects/{project_id}/audio")
+async def upload_audio(
+    project_id: int,
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
+):
+    """Upload audio file for a project"""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Validate file type
+    allowed_types = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only MP3 and WAV are allowed.")
+
+    # Create audio directory
+    os.makedirs("data/audio", exist_ok=True)
+
+    # Delete old audio if exists
+    if project.audio_path and os.path.exists(project.audio_path):
+        os.remove(project.audio_path)
+
+    # Determine file extension
+    ext = ".mp3" if "mp3" in file.content_type or "mpeg" in file.content_type else ".wav"
+    audio_path = f"data/audio/{project_id}{ext}"
+
+    try:
+        # Save the uploaded file
+        contents = await file.read()
+        with open(audio_path, "wb") as f:
+            f.write(contents)
+
+        # Update database
+        project.audio_path = audio_path
+        project.audio_clips_count = 1
+        project.updated_at = datetime.utcnow()
+        db.commit()
+
+        # Generate preview in background
+        if background_tasks:
+            background_tasks.add_task(generate_project_assets, project_id, audio_path)
+
+        return {
+            "message": "Audio uploaded successfully",
+            "audio_path": audio_path
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process audio: {str(e)}")
+
+
+@app.post("/projects/create")
+async def create_project(
+    name: str,
+    file: UploadFile = File(...),
+    bpm: Optional[int] = None,
+    key: Optional[str] = None,
+    genre: Optional[str] = None,
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
+):
+    """Create a new project with audio upload"""
+    # Validate file type
+    allowed_types = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Invalid file type. Only MP3 and WAV are allowed.")
+
+    try:
+        # Create new project
+        new_project = Project(
+            name=name,
+            bpm=bpm,
+            key=key,
+            genre=genre,
+            audio_clips_count=1,
+            status="idea"
+        )
+        db.add(new_project)
+        db.commit()
+        db.refresh(new_project)
+
+        # Create audio directory
+        os.makedirs("data/audio", exist_ok=True)
+
+        # Determine file extension
+        ext = ".mp3" if "mp3" in file.content_type or "mpeg" in file.content_type else ".wav"
+        audio_path = f"data/audio/{new_project.id}{ext}"
+
+        # Save the uploaded file
+        contents = await file.read()
+        with open(audio_path, "wb") as f:
+            f.write(contents)
+
+        # Update project with audio path
+        new_project.audio_path = audio_path
+        db.commit()
+
+        # Generate preview in background
+        if background_tasks:
+            background_tasks.add_task(generate_project_assets, new_project.id, audio_path)
+
+        return {
+            "message": "Project created successfully",
+            "project_id": new_project.id,
+            "project": {
+                "id": new_project.id,
+                "name": new_project.name,
+                "bpm": new_project.bpm,
+                "key": new_project.key,
+                "status": new_project.status,
+                "audio_clips": new_project.audio_clips_count
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create project: {str(e)}")
+
+
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):
     """Delete a project from the database"""
@@ -252,6 +436,8 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
         os.remove(project.preview_path)
     if project.cover_path and os.path.exists(project.cover_path):
         os.remove(project.cover_path)
+    if project.audio_path and os.path.exists(project.audio_path):
+        os.remove(project.audio_path)
 
     db.delete(project)
     db.commit()

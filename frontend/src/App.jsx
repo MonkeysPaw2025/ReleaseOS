@@ -10,9 +10,25 @@ const STATUSES = {
   released: { label: 'Released', color: 'bg-green-500' }
 }
 
-function ProjectCard({ project, onPlay, isPlaying, onStatusChange, onUploadToSoundCloud, isUploading }) {
+function ProjectCard({ project, onPlay, isPlaying, onStatusChange, onUploadToSoundCloud, isUploading, onUploadCover, onUploadAudio }) {
   const coverUrl = project.cover_url ? `${API_BASE}${project.cover_url}` : null
   const hasAudio = project.preview_url && project.audio_clips > 0
+  const coverInputRef = useRef(null)
+  const audioInputRef = useRef(null)
+
+  const handleCoverUpload = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      onUploadCover(project.id, file)
+    }
+  }
+
+  const handleAudioUpload = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      onUploadAudio(project.id, file)
+    }
+  }
 
   return (
     <div className="bg-gray-800 rounded-lg overflow-hidden hover:ring-2 hover:ring-indigo-500 transition-all">
@@ -31,14 +47,14 @@ function ProjectCard({ project, onPlay, isPlaying, onStatusChange, onUploadToSou
 
         {/* Play button overlay */}
         {hasAudio ? (
-          <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-50 flex items-center justify-center transition-all">
-            <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute inset-0 bg-black bg-opacity-30 group-hover:bg-opacity-50 flex items-center justify-center transition-all">
+            <div className="opacity-100 transition-opacity">
               {isPlaying ? (
-                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center">
+                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-lg">
                   <span className="text-3xl">⏸</span>
                 </div>
               ) : (
-                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center">
+                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-lg">
                   <span className="text-3xl ml-1">▶</span>
                 </div>
               )}
@@ -51,6 +67,46 @@ function ProjectCard({ project, onPlay, isPlaying, onStatusChange, onUploadToSou
             </div>
           </div>
         )}
+
+        {/* Upload buttons - bottom left */}
+        <div className="absolute bottom-2 left-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              coverInputRef.current?.click()
+            }}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-2 py-1 rounded"
+            title="Upload cover art"
+          >
+            📷 Cover
+          </button>
+          {!hasAudio && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                audioInputRef.current?.click()
+              }}
+              className="bg-green-600 hover:bg-green-700 text-white text-xs px-2 py-1 rounded"
+              title="Upload audio file"
+            >
+              🎵 Audio
+            </button>
+          )}
+        </div>
+        <input
+          ref={coverInputRef}
+          type="file"
+          accept="image/jpeg,image/jpg,image/png,image/webp"
+          onChange={handleCoverUpload}
+          className="hidden"
+        />
+        <input
+          ref={audioInputRef}
+          type="file"
+          accept="audio/mpeg,audio/mp3,audio/wav"
+          onChange={handleAudioUpload}
+          className="hidden"
+        />
 
         {/* Status badge */}
         <div className={`absolute top-2 right-2 ${STATUSES[project.status].color} text-white text-xs px-2 py-1 rounded-full`}>
@@ -133,6 +189,9 @@ function App() {
   const [soundcloudConnected, setSoundcloudConnected] = useState(false)
   const [soundcloudUser, setSoundcloudUser] = useState(null)
   const [uploadingProject, setUploadingProject] = useState(null)
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [isPlaying, setIsPlaying] = useState(false)
 
   // Filters
   const [statusFilter, setStatusFilter] = useState('all')
@@ -183,19 +242,13 @@ function App() {
   const scanProjects = async () => {
     setScanning(true)
     try {
-      console.log('Fetching scan endpoint...')
       const res = await fetch(`${API_BASE}/projects/scan`, { method: 'POST' })
-      console.log('Scan response received:', res.status, res.ok)
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`)
       }
-      console.log('Parsing JSON...')
       const data = await res.json()
-      console.log('Scan data:', data)
       alert(data.message)
-      console.log('Loading projects...')
       await loadProjects()
-      console.log('Projects loaded successfully')
     } catch (err) {
       console.error('Error scanning projects:', err)
       alert(`Error scanning projects: ${err.message}`)
@@ -234,33 +287,69 @@ function App() {
     // Stop if same project
     if (currentlyPlaying?.id === project.id) {
       wavesurferRef.current?.playPause()
+      setIsPlaying(!isPlaying)
       return
     }
 
     // Destroy existing wavesurfer
     if (wavesurferRef.current) {
       wavesurferRef.current.destroy()
+      wavesurferRef.current = null
     }
 
-    // Create new wavesurfer
-    const ws = WaveSurfer.create({
-      container: waveformContainerRef.current,
-      waveColor: '#6366f1',
-      progressColor: '#4f46e5',
-      cursorColor: '#818cf8',
-      barWidth: 2,
-      barRadius: 3,
-      height: 80,
-      normalize: true
-    })
-
-    ws.load(`${API_BASE}${project.preview_url}`)
-    ws.on('ready', () => ws.play())
-    ws.on('finish', () => setCurrentlyPlaying(null))
-
-    wavesurferRef.current = ws
+    // Set the project first - this will render the container
     setCurrentlyPlaying(project)
   }
+
+  // Create WaveSurfer when currentlyPlaying changes
+  useEffect(() => {
+    if (!currentlyPlaying || !currentlyPlaying.preview_url) return
+
+    // Wait for container to be available
+    const initWaveSurfer = () => {
+      if (!waveformContainerRef.current) {
+        // Container not ready yet, try again
+        setTimeout(initWaveSurfer, 50)
+        return
+      }
+
+      // Create new wavesurfer
+      const ws = WaveSurfer.create({
+        container: waveformContainerRef.current,
+        waveColor: '#6366f1',
+        progressColor: '#4f46e5',
+        cursorColor: '#818cf8',
+        barWidth: 2,
+        barRadius: 3,
+        height: 80,
+        normalize: true
+      })
+
+      ws.load(`${API_BASE}${currentlyPlaying.preview_url}`)
+      ws.on('ready', () => {
+        ws.play()
+        setIsPlaying(true)
+      })
+      ws.on('finish', () => {
+        setCurrentlyPlaying(null)
+        setIsPlaying(false)
+      })
+      ws.on('pause', () => setIsPlaying(false))
+      ws.on('play', () => setIsPlaying(true))
+
+      wavesurferRef.current = ws
+    }
+
+    initWaveSurfer()
+
+    // Cleanup
+    return () => {
+      if (wavesurferRef.current) {
+        wavesurferRef.current.destroy()
+        wavesurferRef.current = null
+      }
+    }
+  }, [currentlyPlaying])
 
   const updateProjectStatus = async (projectId, newStatus) => {
     try {
@@ -356,6 +445,79 @@ function App() {
     }
   }
 
+  const uploadCover = async (projectId, file) => {
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const res = await fetch(`${API_BASE}/projects/${projectId}/cover`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!res.ok) {
+        const error = await res.json()
+        throw new Error(error.detail || 'Upload failed')
+      }
+
+      const data = await res.json()
+      alert(data.message)
+      await loadProjects()
+    } catch (err) {
+      console.error('Error uploading cover:', err)
+      alert(`Failed to upload cover: ${err.message}`)
+    }
+  }
+
+  const uploadAudio = async (projectId, file) => {
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const res = await fetch(`${API_BASE}/projects/${projectId}/audio`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!res.ok) {
+        const error = await res.json()
+        throw new Error(error.detail || 'Upload failed')
+      }
+
+      const data = await res.json()
+      alert(data.message)
+      await loadProjects()
+    } catch (err) {
+      console.error('Error uploading audio:', err)
+      alert(`Failed to upload audio: ${err.message}`)
+    }
+  }
+
+  const createProject = async (formData) => {
+    setCreating(true)
+    try {
+      const res = await fetch(`${API_BASE}/projects/create`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!res.ok) {
+        const error = await res.json()
+        throw new Error(error.detail || 'Create failed')
+      }
+
+      const data = await res.json()
+      alert(data.message)
+      setShowCreateModal(false)
+      await loadProjects()
+    } catch (err) {
+      console.error('Error creating project:', err)
+      alert(`Failed to create project: ${err.message}`)
+    } finally {
+      setCreating(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
@@ -398,6 +560,12 @@ function App() {
                   🔊 Connect SoundCloud
                 </button>
               )}
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-medium transition-colors"
+              >
+                + New Project
+              </button>
               <button
                 onClick={scanProjects}
                 disabled={scanning}
@@ -459,19 +627,62 @@ function App() {
         {currentlyPlaying && (
           <div className="bg-gray-800 rounded-lg p-6 mb-8">
             <div className="flex items-center justify-between mb-4">
-              <div>
+              <div className="flex-1">
                 <h3 className="text-white font-semibold text-lg">{currentlyPlaying.name}</h3>
-                <p className="text-gray-400 text-sm">{currentlyPlaying.bpm} BPM</p>
+                <p className="text-gray-400 text-sm">{currentlyPlaying.bpm} BPM • {currentlyPlaying.key || 'No key'}</p>
               </div>
-              <button
-                onClick={() => {
-                  wavesurferRef.current?.destroy()
-                  setCurrentlyPlaying(null)
-                }}
-                className="text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
+              <div className="flex items-center gap-3">
+                {/* Play/Pause button */}
+                <button
+                  onClick={() => wavesurferRef.current?.playPause()}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-full w-12 h-12 flex items-center justify-center transition-colors"
+                  title={isPlaying ? 'Pause' : 'Play'}
+                >
+                  {isPlaying ? (
+                    <span className="text-2xl">⏸</span>
+                  ) : (
+                    <span className="text-2xl ml-1">▶</span>
+                  )}
+                </button>
+
+                {/* Stop button */}
+                <button
+                  onClick={() => {
+                    wavesurferRef.current?.stop()
+                    setIsPlaying(false)
+                  }}
+                  className="bg-gray-700 hover:bg-gray-600 text-white rounded-full w-10 h-10 flex items-center justify-center transition-colors"
+                  title="Stop"
+                >
+                  <span className="text-xl">⏹</span>
+                </button>
+
+                {/* Replay button */}
+                <button
+                  onClick={() => {
+                    wavesurferRef.current?.seekTo(0)
+                    wavesurferRef.current?.play()
+                    setIsPlaying(true)
+                  }}
+                  className="bg-gray-700 hover:bg-gray-600 text-white rounded-full w-10 h-10 flex items-center justify-center transition-colors"
+                  title="Replay from start"
+                >
+                  <span className="text-xl">↻</span>
+                </button>
+
+                {/* Close button */}
+                <button
+                  onClick={() => {
+                    wavesurferRef.current?.destroy()
+                    setCurrentlyPlaying(null)
+                    setIsPlaying(false)
+                  }}
+                  className="text-gray-400 hover:text-white text-2xl"
+                  title="Close player"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
             <div ref={waveformContainerRef} className="rounded overflow-hidden" />
           </div>
@@ -503,11 +714,110 @@ function App() {
                 onStatusChange={updateProjectStatus}
                 onUploadToSoundCloud={uploadToSoundCloud}
                 isUploading={uploadingProject === project.id}
+                onUploadCover={uploadCover}
+                onUploadAudio={uploadAudio}
               />
             ))}
           </div>
         )}
       </div>
+
+      {/* Create Project Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4">
+            <h2 className="text-2xl font-bold text-white mb-4">Create New Project</h2>
+            <form onSubmit={(e) => {
+              e.preventDefault()
+              const formData = new FormData(e.target)
+              createProject(formData)
+            }}>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Project Name *
+                  </label>
+                  <input
+                    type="text"
+                    name="name"
+                    required
+                    className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+                    placeholder="My Awesome Track"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Audio File (MP3/WAV) *
+                  </label>
+                  <input
+                    type="file"
+                    name="file"
+                    accept="audio/mpeg,audio/mp3,audio/wav"
+                    required
+                    className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">
+                      BPM
+                    </label>
+                    <input
+                      type="number"
+                      name="bpm"
+                      className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+                      placeholder="120"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-1">
+                      Key
+                    </label>
+                    <input
+                      type="text"
+                      name="key"
+                      className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+                      placeholder="C minor"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    Genre
+                  </label>
+                  <input
+                    type="text"
+                    name="genre"
+                    className="w-full bg-gray-700 text-white px-4 py-2 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500"
+                    placeholder="House, Techno, etc."
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(false)}
+                  className="flex-1 bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creating}
+                  className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors"
+                >
+                  {creating ? 'Creating...' : 'Create Project'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

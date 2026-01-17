@@ -19,7 +19,8 @@ class Project(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
-    als_path = Column(String, unique=True, nullable=False)
+    als_path = Column(String, unique=True, nullable=True)  # Nullable for manual projects
+    audio_path = Column(String)  # Path to uploaded audio file
     bpm = Column(Integer)
     key = Column(String)
     audio_clips_count = Column(Integer, default=0)
