@@ -183,13 +183,22 @@ function App() {
   const scanProjects = async () => {
     setScanning(true)
     try {
+      console.log('Fetching scan endpoint...')
       const res = await fetch(`${API_BASE}/projects/scan`, { method: 'POST' })
+      console.log('Scan response received:', res.status, res.ok)
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`)
+      }
+      console.log('Parsing JSON...')
       const data = await res.json()
+      console.log('Scan data:', data)
       alert(data.message)
+      console.log('Loading projects...')
       await loadProjects()
+      console.log('Projects loaded successfully')
     } catch (err) {
       console.error('Error scanning projects:', err)
-      alert('Error scanning projects')
+      alert(`Error scanning projects: ${err.message}`)
     } finally {
       setScanning(false)
     }
