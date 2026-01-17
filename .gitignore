@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Release OS Data
+backend/data/
+*.db
+*.db-journal
+
+# Logs
+*.log
+backend.log
+frontend.log
+watcher.log
+
+# Process IDs
+*.pid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Build
+frontend/dist/
+frontend/build/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
